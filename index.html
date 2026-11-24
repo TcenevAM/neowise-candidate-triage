@@ -8,7 +8,8 @@
     body { max-width: 40rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
     textarea { box-sizing: border-box; display: block; width: 100%; margin: .5rem 0; padding: .5rem; font: inherit; }
     button { padding: .4rem .8rem; font: inherit; }
-    pre { white-space: pre-wrap; }
+    #draft { white-space: pre-wrap; }
+    #status { min-height: 1.5em; }
   </style>
 </head>
 <body>
@@ -18,18 +19,91 @@
     <textarea id="message" rows="4"></textarea>
     <button type="submit">Разобрать заявку</button>
   </form>
-  <pre id="result" aria-live="polite"></pre>
+  <p id="status" role="status" aria-live="polite"></p>
+  <section id="result" hidden aria-label="Результат разбора">
+    <h2>Тема: <span id="topic"></span></h2>
+    <label for="draft">Черновик ответа — проверь и исправь перед отправкой</label>
+    <textarea id="draft" rows="4"></textarea>
+  </section>
   <script type="module">
     const form = document.querySelector("form");
+    const message = document.querySelector("#message");
     const result = document.querySelector("#result");
+    const status = document.querySelector("#status");
+    const topic = document.querySelector("#topic");
+    const draft = document.querySelector("#draft");
+    const topics = { delivery: "Доставка", pricing: "Цена", other: "Другое" };
+    let latestRequest = 0;
+    let pending = null;
+
+    function clearResult() {
+      result.hidden = true;
+      topic.textContent = "";
+      draft.value = "";
+    }
+
+    function manualReview() {
+      clearResult();
+      status.textContent = "Нужен ручной разбор. Не удалось подготовить корректный ответ. Определи тему и подготовь ответ клиенту вручную.";
+    }
+
+    message.addEventListener("input", () => {
+      latestRequest++;
+      pending?.abort();
+      pending = null;
+      clearResult();
+      status.textContent = "";
+      form.setAttribute("aria-busy", "false");
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const reply = await fetch("/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: document.querySelector("#message").value }),
-      });
-      result.textContent = JSON.stringify(await reply.json(), null, 2);
+      const requestId = ++latestRequest;
+      pending?.abort();
+      pending = null;
+      clearResult();
+      form.setAttribute("aria-busy", "false");
+      const text = message.value.trim();
+      if (!text) {
+        status.textContent = "Введи текст заявки.";
+        return;
+      }
+
+      const controller = new AbortController();
+      pending = controller;
+      const timer = setTimeout(() => controller.abort(), 2000);
+      status.textContent = "Разбираем заявку…";
+      form.setAttribute("aria-busy", "true");
+      try {
+        const reply = await fetch("/api/triage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        });
+        const data = await reply.json();
+        if (requestId !== latestRequest) return;
+        if (reply.status === 400 && data?.status === "invalid_input") {
+          status.textContent = "Введи непустой текст заявки и повтори разбор.";
+        } else if (reply.ok && data?.status === "ready" &&
+                   Object.hasOwn(topics, data.topic) &&
+                   typeof data.draft === "string" && data.draft.trim()) {
+          topic.textContent = topics[data.topic];
+          draft.value = data.draft.trim();
+          result.hidden = false;
+          status.textContent = "Черновик готов. Проверь его перед отправкой клиенту.";
+        } else {
+          manualReview();
+        }
+      } catch {
+        if (requestId === latestRequest) manualReview();
+      } finally {
+        clearTimeout(timer);
+        if (requestId === latestRequest) {
+          pending = null;
+          form.setAttribute("aria-busy", "false");
+        }
+      }
     });
   </script>
 </body>
